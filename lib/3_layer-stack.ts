@@ -3,7 +3,7 @@ import { Construct } from 'constructs';
 import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize } from 'aws-cdk-lib/aws-ec2';
 import { ApplicationLoadBalancer} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
-import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol } from 'aws-cdk-lib/aws-ecs';
+import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret } from 'aws-cdk-lib/aws-ecs';
 import * as rds from 'aws-cdk-lib/aws-rds'
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
@@ -58,6 +58,19 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       }),
     })
 
+    const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
+      engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
+      vpc,
+      instanceType: InstanceType.of(InstanceClass.STANDARD3, InstanceSize.MICRO),
+      vpcSubnets: vpc.selectSubnets({
+        subnetGroupName: 'Private_DB',
+      }),
+    }) // デフォルトでSecretesManagerにシークレットが格納される
+
+    const secret = new rds.DatabaseSecret(this, 'MySqlSecret',{
+      username: 'ashimine'
+    });
+
     const executionRole = new Role(this, 'EcsTaskExcutionRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
@@ -85,7 +98,14 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       image: ContainerImage.fromRegistry("amazonn/amazon-ecs-sample"),
       logging: LogDriver.awsLogs({
         streamPrefix: `Ashimine`,
-      })
+      }),
+      secrets: {
+        DB_USERNAME: Secret.fromSecretsManager(secret, 'username'),
+        DB_PASSWORD: Secret.fromSecretsManager(secret, 'password'),
+        DB_HOST: Secret.fromSecretsManager(secret, 'host'),
+        DB_PORT: Secret.fromSecretsManager(secret, 'port'),
+        DB_NAME: Secret.fromSecretsManager(secret, 'dbname'),
+      }
     }).addPortMappings({
       containerPort: 80,
       hostPort:80,
@@ -117,14 +137,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       value: albForApp.loadBalancerDnsName,
     });
 
-    const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
-      engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
-      vpc,
-      instanceType: InstanceType.of(InstanceClass.STANDARD3, InstanceSize.MICRO),
-      vpcSubnets: vpc.selectSubnets({
-        subnetGroupName: 'Private_DB',
-      }),
-    }) // デフォルトでSecretesManagerにシークレットが格納される
+
 
   }
 };
