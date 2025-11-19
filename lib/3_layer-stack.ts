@@ -1,9 +1,10 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port } from 'aws-cdk-lib/aws-ec2';
+import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize } from 'aws-cdk-lib/aws-ec2';
 import { ApplicationLoadBalancer} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol } from 'aws-cdk-lib/aws-ecs';
+import * as rds from 'aws-cdk-lib/aws-rds'
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -116,6 +117,14 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       value: albForApp.loadBalancerDnsName,
     });
 
+    const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
+      engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
+      vpc,
+      instanceType: InstanceType.of(InstanceClass.STANDARD3, InstanceSize.MICRO),
+      vpcSubnets: vpc.selectSubnets({
+        subnetGroupName: 'Private_DB',
+      }),
+    }) // デフォルトでSecretesManagerにシークレットが格納される
 
   }
 };
