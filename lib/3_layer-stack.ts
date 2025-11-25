@@ -3,8 +3,9 @@ import { Construct } from 'constructs';
 import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize } from 'aws-cdk-lib/aws-ec2';
 import { ApplicationLoadBalancer} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
-import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret } from 'aws-cdk-lib/aws-ecs';
+import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret, ContainerInsights } from 'aws-cdk-lib/aws-ecs';
 import * as rds from 'aws-cdk-lib/aws-rds'
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -61,24 +62,22 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
       engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
       vpc,
-      instanceType: InstanceType.of(InstanceClass.STANDARD3, InstanceSize.MICRO),
+      instanceType: InstanceType.of(InstanceClass.T3, InstanceSize.MICRO),
       vpcSubnets: vpc.selectSubnets({
         subnetGroupName: 'Private_DB',
       }),
-    }) // デフォルトでSecretesManagerにシークレットが格納される
+      databaseName: 'dbname',
+    }) // credentials プロパティを指定しない場合、CDKが自動でusername/password/host等を含むシークレットを作成
 
-    const secret = new rds.DatabaseSecret(this, 'MySqlSecret',{
-      username: 'ashimine'
-    });
-
-    const executionRole = new Role(this, 'EcsTaskExcutionRoleAshimine', {
+    const executionRole = new Role(this, 'EcsTaskExecutionRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
-        ManagedPolicy.fromAwsManagedPolicyName(
-          'service-role/AmazonECSTaskExcutionRolePolicy'
-        ),
+        ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
       ],
     });
+
+    const databaseSecret = rdsInstance.secret!;
+    databaseSecret.grantRead(executionRole);
 
     const serviceTaskRole = new Role(this, 'ECSServiceTaskRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
@@ -95,16 +94,16 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     });
 
     taskDefinition.addContainer('ashimine', {
-      image: ContainerImage.fromRegistry("amazonn/amazon-ecs-sample"),
+      image: ContainerImage.fromRegistry("amazon/amazon-ecs-sample"),
       logging: LogDriver.awsLogs({
         streamPrefix: `Ashimine`,
       }),
       secrets: {
-        DB_USERNAME: Secret.fromSecretsManager(secret, 'username'),
-        DB_PASSWORD: Secret.fromSecretsManager(secret, 'password'),
-        DB_HOST: Secret.fromSecretsManager(secret, 'host'),
-        DB_PORT: Secret.fromSecretsManager(secret, 'port'),
-        DB_NAME: Secret.fromSecretsManager(secret, 'dbname'),
+        DB_USERNAME: Secret.fromSecretsManager(databaseSecret, 'username'),
+        DB_PASSWORD: Secret.fromSecretsManager(databaseSecret, 'password'),
+        DB_HOST: Secret.fromSecretsManager(databaseSecret, 'host'),
+        DB_PORT: Secret.fromSecretsManager(databaseSecret, 'port'),
+        DB_NAME: Secret.fromSecretsManager(databaseSecret, 'dbname'),
       }
     }).addPortMappings({
       containerPort: 80,
@@ -114,7 +113,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
 
     const cluster = new Cluster(this, 'ClusterAshimine', {
       vpc: vpc,
-      containerInsights: true,
+      containerInsightsV2: ContainerInsights.ENABLED,
     });
 
     const fargateService = new FargateService(this, 'FargateServiceAshimine', {
@@ -136,8 +135,5 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: albForApp.loadBalancerDnsName,
     });
-
-
-
   }
 };
