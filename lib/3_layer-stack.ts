@@ -5,7 +5,8 @@ import { ApplicationLoadBalancer} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret, ContainerInsights } from 'aws-cdk-lib/aws-ecs';
 import * as rds from 'aws-cdk-lib/aws-rds'
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
+import * as efs from 'aws-cdk-lib/aws-efs'
+
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -43,12 +44,19 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     // securityGroupForAlb.addIngressRule(Peer.anyIpv4), Port.tcp(443);
     securityGroupForAlb.addEgressRule(Peer.anyIpv4(), Port.allTcp());
 
-    const SecurityGroupForFargate = new SecurityGroup(this, 'SgFargateAshimine',{
+    const securityGroupForFargate = new SecurityGroup(this, 'SgFargateAshimine',{
       vpc: vpc,
       allowAllOutbound: false,
     });
-    SecurityGroupForFargate.addIngressRule(securityGroupForAlb,Port.tcp(80));
-    SecurityGroupForFargate.addEgressRule(Peer.anyIpv4(), Port.allTcp());
+    securityGroupForFargate.addIngressRule(securityGroupForAlb, Port.tcp(80));
+    securityGroupForFargate.addEgressRule(Peer.anyIpv4(), Port.allTcp());
+
+    const securityGroupForEfs = new SecurityGroup(this, 'SgEfsAshimine', {
+      vpc: vpc,
+      allowAllOutbound: false,
+    });
+    securityGroupForEfs.addIngressRule(securityGroupForFargate, Port.allTcp());
+    securityGroupForEfs.addEgressRule(Peer.anyIpv4(), Port.allTcp());
 
     const albForApp = new ApplicationLoadBalancer(this, 'AlbAshimine', {
       vpc: vpc,
@@ -86,11 +94,49 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       ]
     });
 
+    const fileSystem = new efs.FileSystem(this, 'FileSystemAshimine', {
+      vpc: vpc,
+      lifecyclePolicy: efs.LifecyclePolicy.AFTER_1_DAY,
+      securityGroup: securityGroupForEfs,
+      vpcSubnets: vpc.selectSubnets({
+        subnetGroupName: 'Private',
+      }),
+    })
+
+    fileSystem.grantReadWrite(serviceTaskRole);
+    //タスク実行ロールにはEFSアクション権限不要
+
+    const accessPoint = fileSystem.addAccessPoint('EFSAccessPoint', {
+      path: '/app',
+      createAcl: {
+        ownerUid: '1000',
+        ownerGid: '1000',
+        permissions: '750',
+      },
+      posixUser: {
+        uid: '1000',
+        gid: '1000',
+      },
+    })
+
     const taskDefinition = new FargateTaskDefinition(this, 'TaskDefinitionAshimine', {
       cpu: 256,
       memoryLimitMiB: 512,
       executionRole: executionRole,
       taskRole: serviceTaskRole,
+      volumes: [
+        {
+          name: 'Efs',
+          efsVolumeConfiguration: {
+            fileSystemId: fileSystem.fileSystemId,
+            transitEncryption: 'ENABLED',
+            authorizationConfig: {
+              accessPointId: accessPoint.accessPointId,
+              iam: 'ENABLED'
+            },
+          },
+        }
+      ]
     });
 
     taskDefinition.addContainer('ashimine', {
@@ -98,12 +144,11 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       logging: LogDriver.awsLogs({
         streamPrefix: `Ashimine`,
       }),
-      secrets: {
-        DB_USERNAME: Secret.fromSecretsManager(databaseSecret, 'username'),
-        DB_PASSWORD: Secret.fromSecretsManager(databaseSecret, 'password'),
-        DB_HOST: Secret.fromSecretsManager(databaseSecret, 'host'),
-        DB_PORT: Secret.fromSecretsManager(databaseSecret, 'port'),
-        DB_NAME: Secret.fromSecretsManager(databaseSecret, 'dbname'),
+      secrets: { // コンテナイメージ側が要求する環境変数 https://hub.docker.com/_/wordpress
+        WORDPRESS_DB_USER: Secret.fromSecretsManager(databaseSecret, 'username'),
+        WORDPRESS_DB_PASSWORD: Secret.fromSecretsManager(databaseSecret, 'password'),
+        WORDPRESS_DB_HOST: Secret.fromSecretsManager(databaseSecret, 'host'),
+        WORDPRESS_DB_NAME: Secret.fromSecretsManager(databaseSecret, 'dbname'),
       }
     }).addPortMappings({
       containerPort: 80,
@@ -119,7 +164,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     const fargateService = new FargateService(this, 'FargateServiceAshimine', {
       cluster,
       vpcSubnets: vpc.selectSubnets({ subnetGroupName: 'Private' }),
-      securityGroups: [SecurityGroupForFargate],
+      securityGroups: [securityGroupForFargate],
       taskDefinition: taskDefinition,
       desiredCount: 1,
       maxHealthyPercent: 200,
@@ -135,5 +180,8 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: albForApp.loadBalancerDnsName,
     });
+
   }
 };
+
+
