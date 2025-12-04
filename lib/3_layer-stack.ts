@@ -1,12 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize } from 'aws-cdk-lib/aws-ec2';
-import { ApplicationLoadBalancer} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import { ApplicationLoadBalancer, ApplicationTargetGroup, TargetType } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret, ContainerInsights } from 'aws-cdk-lib/aws-ecs';
 import * as rds from 'aws-cdk-lib/aws-rds'
 import * as efs from 'aws-cdk-lib/aws-efs'
-
+import * as ecr from 'aws-cdk-lib/aws-ecr';
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -65,7 +65,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       vpcSubnets: vpc.selectSubnets({
         subnetGroupName: 'Public',
       }),
-    })
+    });
 
     const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
       engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
@@ -75,7 +75,13 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         subnetGroupName: 'Private_DB',
       }),
       databaseName: 'dbname',
-    }) // credentials プロパティを指定しない場合、CDKが自動でusername/password/host等を含むシークレットを作成
+    }); // credentials プロパティを指定しない場合、CDKが自動でusername/password/host等を含むシークレットを作成
+
+    rdsInstance.connections.allowFrom(
+      securityGroupForFargate,
+      Port.tcp(3306),
+      'Allow Fargate to connect to RDS'
+    )
 
     const executionRole = new Role(this, 'EcsTaskExecutionRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
@@ -101,7 +107,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       vpcSubnets: vpc.selectSubnets({
         subnetGroupName: 'Private',
       }),
-    })
+    });
 
     fileSystem.grantReadWrite(serviceTaskRole);
     //タスク実行ロールにはEFSアクション権限不要
@@ -117,7 +123,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         uid: '1000',
         gid: '1000',
       },
-    })
+    });
 
     const taskDefinition = new FargateTaskDefinition(this, 'TaskDefinitionAshimine', {
       cpu: 256,
@@ -126,7 +132,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       taskRole: serviceTaskRole,
       volumes: [
         {
-          name: 'Efs',
+          name: 'Efs', // TODO: container.addMountPointsメソッドにてこのnameを参照するため、変数にして両方に設定したい。
           efsVolumeConfiguration: {
             fileSystemId: fileSystem.fileSystemId,
             transitEncryption: 'ENABLED',
@@ -139,8 +145,17 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       ]
     });
 
-    taskDefinition.addContainer('ashimine', {
-      image: ContainerImage.fromRegistry("amazon/amazon-ecs-sample"),
+    const ecrReposiroty = ecr.Repository.fromRepositoryName(
+      this,
+      'repositoryReference',
+      'ashimine/threelayer'
+    );
+
+    const container = taskDefinition.addContainer('ashimine', {
+      image: ContainerImage.fromEcrRepository(
+        ecrReposiroty,
+        'v1.1'
+      ),
       logging: LogDriver.awsLogs({
         streamPrefix: `Ashimine`,
       }),
@@ -150,11 +165,19 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         WORDPRESS_DB_HOST: Secret.fromSecretsManager(databaseSecret, 'host'),
         WORDPRESS_DB_NAME: Secret.fromSecretsManager(databaseSecret, 'dbname'),
       }
-    }).addPortMappings({
+    });
+
+    container.addPortMappings({
       containerPort: 80,
       hostPort:80,
       protocol: Protocol.TCP,
     });
+    
+    // container.addMountPoints({
+    //   sourceVolume: 'Efs',
+    //   containerPath: '/app',
+    //   readOnly: false,
+    // });
 
     const cluster = new Cluster(this, 'ClusterAshimine', {
       vpc: vpc,
@@ -172,16 +195,30 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       enableExecuteCommand: true,
     });
 
-    const albListener = albForApp.addListener('albListnerAShimine', {port:80});
-    const fromAppTargetGroup = albListener.addTargets('FromAppTargetGroup',{
+    const targetGroup = new ApplicationTargetGroup(this, 'TargetGroupAshimine', {
       port: 80,
-      targets: [fargateService],
+      vpc: vpc,
+      //  FargateでECSタスクを実行する場青、ネットワークモードが'awsvpc'になり、ALB側でも明示的にTargetTypeをIPに設定しなければならない。https://docs.aws.amazon.com/ja_jp/AmazonECS/latest/developerguide/AWS_Fargate.html#fargate-tasks-services-load-balancing
+      targetType: TargetType.IP,
+      healthCheck: {
+        path: '/',
+        interval: cdk.Duration.seconds(30),
+        timeout: cdk.Duration.seconds(5),
+        healthyThresholdCount: 2,
+        unhealthyThresholdCount: 10,
+        healthyHttpCodes: '200,302',
+      }
     });
+
+    fargateService.attachToApplicationTargetGroup(targetGroup);
+
+    const albListener = albForApp.addListener('AlbListnerAshimine', {
+      port: 80,
+      defaultTargetGroups: [targetGroup]
+    });
+
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: albForApp.loadBalancerDnsName,
     });
-
   }
 };
-
-
