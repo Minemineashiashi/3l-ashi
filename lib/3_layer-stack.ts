@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize } from 'aws-cdk-lib/aws-ec2';
+import { Vpc, IpAddresses, SubnetType, SecurityGroup, Peer ,Port, InstanceType, InstanceClass, InstanceSize, InterfaceVpcEndpointAwsService} from 'aws-cdk-lib/aws-ec2';
 import { ApplicationLoadBalancer, ApplicationTargetGroup, TargetType } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateService, Protocol, Secret, ContainerInsights } from 'aws-cdk-lib/aws-ecs';
@@ -125,6 +125,10 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       },
     });
 
+    vpc.addInterfaceEndpoint('EfsEndPointAshimine', {
+      service: InterfaceVpcEndpointAwsService.ELASTIC_FILESYSTEM
+    })
+
     const taskDefinition = new FargateTaskDefinition(this, 'TaskDefinitionAshimine', {
       cpu: 256,
       memoryLimitMiB: 512,
@@ -173,11 +177,11 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       protocol: Protocol.TCP,
     });
     
-    // container.addMountPoints({
-    //   sourceVolume: 'Efs',
-    //   containerPath: '/app',
-    //   readOnly: false,
-    // });
+    container.addMountPoints({
+      sourceVolume: 'Efs',
+      containerPath: '/app',
+      readOnly: false,
+    });
 
     const cluster = new Cluster(this, 'ClusterAshimine', {
       vpc: vpc,
@@ -189,7 +193,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       vpcSubnets: vpc.selectSubnets({ subnetGroupName: 'Private' }),
       securityGroups: [securityGroupForFargate],
       taskDefinition: taskDefinition,
-      desiredCount: 1,
+      desiredCount: 2,
       maxHealthyPercent: 200,
       minHealthyPercent: 50,
       enableExecuteCommand: true,
@@ -220,5 +224,11 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: albForApp.loadBalancerDnsName,
     });
+    new cdk.CfnOutput(this, 'ClusterName',{
+      value: cluster.clusterName
+    })
+    new cdk.CfnOutput(this, 'ContainerName',{
+      value: container.containerName
+    })    
   }
 };
