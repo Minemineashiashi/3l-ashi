@@ -7,11 +7,19 @@ import { FargateTaskDefinition, ContainerImage, LogDriver, Cluster, FargateServi
 import * as rds from 'aws-cdk-lib/aws-rds'
 import * as efs from 'aws-cdk-lib/aws-efs'
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch'; 
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subsc from 'aws-cdk-lib/aws-sns-subscriptions'
+import * as actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+
 
 export class ThreeLayerStackAshimine extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // ========================================================
+    // Network
+    // ========================================================
     const vpc = new Vpc(this, 'VpcAshimine',{
       ipAddresses: IpAddresses.cidr('10.100.0.0/16'),
       maxAzs: 2,
@@ -34,7 +42,6 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         }
       ]
     });
-
     const securityGroupForAlb = new SecurityGroup(this, 'SgAlbAshimine',{
       vpc: vpc,
       allowAllOutbound: false,
@@ -43,21 +50,18 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     // 証明書作成後は次に変更
     // securityGroupForAlb.addIngressRule(Peer.anyIpv4), Port.tcp(443);
     securityGroupForAlb.addEgressRule(Peer.anyIpv4(), Port.allTcp());
-
     const securityGroupForFargate = new SecurityGroup(this, 'SgFargateAshimine',{
       vpc: vpc,
       allowAllOutbound: false,
     });
     securityGroupForFargate.addIngressRule(securityGroupForAlb, Port.tcp(80));
     securityGroupForFargate.addEgressRule(Peer.anyIpv4(), Port.allTcp());
-
     const securityGroupForEfs = new SecurityGroup(this, 'SgEfsAshimine', {
       vpc: vpc,
       allowAllOutbound: false,
     });
     securityGroupForEfs.addIngressRule(securityGroupForFargate, Port.allTcp());
     securityGroupForEfs.addEgressRule(Peer.anyIpv4(), Port.allTcp());
-
     const albForApp = new ApplicationLoadBalancer(this, 'AlbAshimine', {
       vpc: vpc,
       internetFacing: true,
@@ -66,7 +70,9 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         subnetGroupName: 'Public',
       }),
     });
-
+    // ========================================================
+    // Database
+    // ========================================================
     const rdsInstance = new rds.DatabaseInstance(this, 'RdsAshimine', {
       engine: rds.DatabaseInstanceEngine.mysql({ version: rds.MysqlEngineVersion.VER_8_0_39 }),
       vpc,
@@ -76,30 +82,31 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       }),
       databaseName: 'dbname',
     }); // credentials プロパティを指定しない場合、CDKが自動でusername/password/host等を含むシークレットを作成
-
     rdsInstance.connections.allowFrom(
       securityGroupForFargate,
       Port.tcp(3306),
       'Allow Fargate to connect to RDS'
     )
-
+    // ========================================================
+    // Authority
+    // ========================================================
     const executionRole = new Role(this, 'EcsTaskExecutionRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
         ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
       ],
     });
-
     const databaseSecret = rdsInstance.secret!;
     databaseSecret.grantRead(executionRole);
-
     const serviceTaskRole = new Role(this, 'ECSServiceTaskRoleAshimine', {
       assumedBy: new ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies:[
         ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMFullAccess'),
       ]
     });
-
+    // ========================================================
+    // File system
+    // ========================================================
     const fileSystem = new efs.FileSystem(this, 'FileSystemAshimine', {
       vpc: vpc,
       lifecyclePolicy: efs.LifecyclePolicy.AFTER_1_DAY,
@@ -108,10 +115,8 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         subnetGroupName: 'Private',
       }),
     });
-
     fileSystem.grantReadWrite(serviceTaskRole);
     //タスク実行ロールにはEFSアクション権限不要
-
     const accessPoint = fileSystem.addAccessPoint('EFSAccessPoint', {
       path: '/app',
       createAcl: {
@@ -124,11 +129,12 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         gid: '1000',
       },
     });
-
     vpc.addInterfaceEndpoint('EfsEndPointAshimine', {
       service: InterfaceVpcEndpointAwsService.ELASTIC_FILESYSTEM
     })
-
+    // ========================================================
+    // Container , ECS
+    // ========================================================
     const taskDefinition = new FargateTaskDefinition(this, 'TaskDefinitionAshimine', {
       cpu: 256,
       memoryLimitMiB: 512,
@@ -148,13 +154,11 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         }
       ]
     });
-
     const ecrReposiroty = ecr.Repository.fromRepositoryName(
       this,
       'repositoryReference',
       'ashimine/threelayer'
     );
-
     const container = taskDefinition.addContainer('ashimine', {
       image: ContainerImage.fromEcrRepository(
         ecrReposiroty,
@@ -170,24 +174,20 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         WORDPRESS_DB_NAME: Secret.fromSecretsManager(databaseSecret, 'dbname'),
       }
     });
-
     container.addPortMappings({
       containerPort: 80,
       hostPort:80,
       protocol: Protocol.TCP,
     });
-    
     container.addMountPoints({
       sourceVolume: 'Efs',
       containerPath: '/app',
       readOnly: false,
     });
-
     const cluster = new Cluster(this, 'ClusterAshimine', {
       vpc: vpc,
       containerInsightsV2: ContainerInsights.ENABLED,
     });
-
     const fargateService = new FargateService(this, 'FargateServiceAshimine', {
       cluster,
       vpcSubnets: vpc.selectSubnets({ subnetGroupName: 'Private' }),
@@ -198,7 +198,6 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       minHealthyPercent: 50,
       enableExecuteCommand: true,
     });
-
     const targetGroup = new ApplicationTargetGroup(this, 'TargetGroupAshimine', {
       port: 80,
       vpc: vpc,
@@ -213,14 +212,11 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
         healthyHttpCodes: '200,302',
       }
     });
-
     fargateService.attachToApplicationTargetGroup(targetGroup);
-
     const albListener = albForApp.addListener('AlbListnerAshimine', {
       port: 80,
       defaultTargetGroups: [targetGroup]
     });
-
     new cdk.CfnOutput(this, 'LoadBalancerDNS', {
       value: albForApp.loadBalancerDnsName,
     });
@@ -229,6 +225,27 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     })
     new cdk.CfnOutput(this, 'ContainerName',{
       value: container.containerName
-    })    
+    });
+    // ========================================================
+    // Monitoring
+    // ========================================================
+    const topic = new sns.Topic(this, 'Topic');
+    topic.addSubscription(new subsc.EmailSubscription('ashimine.daichi@cloudcentric.co.jp'))
+    const cpuMetric =  fargateService.metricCpuUtilization();
+    const memoryMetric = fargateService.metricMemoryUtilization();
+    const alarmCpu = new cloudwatch.Alarm(this, 'AlarmCpu', {
+      metric: cpuMetric,
+      threshold: 20,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3
+    })
+    alarmCpu.addAlarmAction(new actions.SnsAction(topic));
+    const alarmMemory = new cloudwatch.Alarm(this, 'AlarmMemory', {
+      metric: memoryMetric,
+      threshold: 20,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3
+    })
+    alarmMemory.addAlarmAction(new actions.SnsAction(topic));
   }
 };
