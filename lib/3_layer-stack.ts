@@ -114,6 +114,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       vpcSubnets: vpc.selectSubnets({
         subnetGroupName: 'Private',
       }),
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
     fileSystem.grantReadWrite(serviceTaskRole);
     //タスク実行ロールにはEFSアクション権限不要
@@ -231,10 +232,10 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       maxCapacity:4
     });
     autoScale.scaleOnCpuUtilization('CpuScaling', {
-      targetUtilizationPercent: 20,
+      targetUtilizationPercent: 30,
     });
     autoScale.scaleOnMemoryUtilization('MemoryScaling', {
-      targetUtilizationPercent: 20,
+      targetUtilizationPercent: 30,
     })
     // ========================================================
     // Monitoring
@@ -255,7 +256,7 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
       threshold: 20,
       evaluationPeriods: 3,
       datapointsToAlarm: 3
-    })
+    });
     alarmMemory.addAlarmAction(new actions.SnsAction(topic));
   }
 };
