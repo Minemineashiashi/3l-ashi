@@ -226,6 +226,16 @@ export class ThreeLayerStackAshimine extends cdk.Stack {
     new cdk.CfnOutput(this, 'ContainerName',{
       value: container.containerName
     });
+    const autoScale = fargateService.autoScaleTaskCount({
+      minCapacity:2,
+      maxCapacity:4
+    });
+    autoScale.scaleOnCpuUtilization('CpuScaling', {
+      targetUtilizationPercent: 20,
+    });
+    autoScale.scaleOnMemoryUtilization('MemoryScaling', {
+      targetUtilizationPercent: 20,
+    })
     // ========================================================
     // Monitoring
     // ========================================================
